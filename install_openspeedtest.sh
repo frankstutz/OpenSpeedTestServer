@@ -79,6 +79,9 @@ DOMAIN=""
 ACME_SCRIPT="/root/.acme.sh/acme.sh"
 CERT_DIR="/etc/nginx/ssl"
 SSL_PORT=8443
+CHALLENGE_TYPE=""  # "http" or "dns"
+DNS_PROVIDER=""    # DNS provider for DNS-01 challenge
+DNS_API_KEY=""     # API key/token for DNS provider
 
 # -----------------------------
 # Detect CPU cores and RAM for tuning
@@ -441,8 +444,47 @@ prompt_ssl_config() {
     USE_SSL=1
     
     printf "\n${GREEN}✅ SSL will be configured for: ${DOMAIN}${RESET}\n"
-    printf "${YELLOW}⚠️  Important: Ensure that ${DOMAIN} points to this router's public IP!${RESET}\n"
-    printf "${YELLOW}⚠️  Port 80 must be accessible from the internet for Let's Encrypt validation.${RESET}\n"
+    
+    # Choose validation method
+    printf "\n🔐 Choose certificate validation method:\n"
+    printf "1️⃣  HTTP-01 (requires public IP and port 80 accessible)\n"
+    printf "2️⃣  DNS-01 (works without public IP, requires DNS API)\n"
+    printf "3️⃣  Manual DNS (for testing or manual DNS record management)\n"
+    printf "Choose [1-3]: "
+    read -r challenge_choice
+    
+    case $challenge_choice in
+      1)
+        CHALLENGE_TYPE="http"
+        printf "\n${YELLOW}⚠️  Requirements for HTTP-01:${RESET}\n"
+        printf "   - ${DOMAIN} must point to this router's public IP\n"
+        printf "   - Port 80 must be accessible from the internet\n"
+        ;;
+      2)
+        CHALLENGE_TYPE="dns"
+        prompt_dns_provider
+        if [ -z "$DNS_PROVIDER" ]; then
+          printf "${RED}❌ DNS provider setup failed. SSL setup cancelled.${RESET}\n"
+          USE_SSL=0
+          DOMAIN=""
+          return
+        fi
+        ;;
+      3)
+        CHALLENGE_TYPE="dns-manual"
+        printf "\n${YELLOW}⚠️  Manual DNS validation:${RESET}\n"
+        printf "   - You'll need to create TXT records manually\n"
+        printf "   - The script will pause and show you what to create\n"
+        printf "   - Works without public IP or DNS API\n"
+        ;;
+      *)
+        printf "${RED}❌ Invalid choice. SSL setup cancelled.${RESET}\n"
+        USE_SSL=0
+        DOMAIN=""
+        return
+        ;;
+    esac
+    
     printf "\nContinue with SSL setup? [y/N]: "
     read -r confirm_ssl
     
@@ -450,9 +492,158 @@ prompt_ssl_config() {
       printf "SSL setup cancelled. Continuing with HTTP only...\n"
       USE_SSL=0
       DOMAIN=""
+      CHALLENGE_TYPE=""
       sleep 2
     fi
   fi
+}
+
+# -----------------------------
+# DNS Provider Configuration
+# -----------------------------
+prompt_dns_provider() {
+  printf "\n🌐 Select your DNS provider:\n"
+  printf "1️⃣  Cloudflare (recommended)\n"
+  printf "2️⃣  AWS Route53\n"
+  printf "3️⃣  Google Cloud DNS\n"
+  printf "4️⃣  DigitalOcean\n"
+  printf "5️⃣  Namecheap\n"
+  printf "6️⃣  GoDaddy\n"
+  printf "7️⃣  Dynu\n"
+  printf "8️⃣  Duck DNS (free)\n"
+  printf "9️⃣  Other (manual setup required)\n"
+  printf "Choose [1-9]: "
+  read -r dns_choice
+  
+  case $dns_choice in
+    1)
+      DNS_PROVIDER="dns_cf"
+      printf "\n📝 Cloudflare Configuration:\n"
+      printf "   Visit: https://dash.cloudflare.com/profile/api-tokens\n"
+      printf "   Create token with Zone:DNS:Edit permissions\n"
+      printf "\nEnter Cloudflare API Token: "
+      read -r api_token
+      if [ -z "$api_token" ]; then
+        printf "${RED}❌ API token required${RESET}\n"
+        return 1
+      fi
+      export CF_Token="$api_token"
+      DNS_API_KEY="$api_token"
+      ;;
+    2)
+      DNS_PROVIDER="dns_aws"
+      printf "\n📝 AWS Route53 Configuration:\n"
+      printf "Enter AWS Access Key ID: "
+      read -r aws_key
+      printf "Enter AWS Secret Access Key: "
+      read -r aws_secret
+      if [ -z "$aws_key" ] || [ -z "$aws_secret" ]; then
+        printf "${RED}❌ AWS credentials required${RESET}\n"
+        return 1
+      fi
+      export AWS_ACCESS_KEY_ID="$aws_key"
+      export AWS_SECRET_ACCESS_KEY="$aws_secret"
+      DNS_API_KEY="${aws_key}:${aws_secret}"
+      ;;
+    3)
+      DNS_PROVIDER="dns_gcloud"
+      printf "\n📝 Google Cloud DNS Configuration:\n"
+      printf "Enter path to service account JSON file: "
+      read -r gcloud_json
+      if [ ! -f "$gcloud_json" ]; then
+        printf "${RED}❌ JSON file not found${RESET}\n"
+        return 1
+      fi
+      export CLOUDSDK_CORE_PROJECT="$(grep project_id "$gcloud_json" | cut -d'"' -f4)"
+      DNS_API_KEY="$gcloud_json"
+      ;;
+    4)
+      DNS_PROVIDER="dns_dgon"
+      printf "\n📝 DigitalOcean Configuration:\n"
+      printf "   Visit: https://cloud.digitalocean.com/account/api/tokens\n"
+      printf "Enter DigitalOcean API Token: "
+      read -r do_token
+      if [ -z "$do_token" ]; then
+        printf "${RED}❌ API token required${RESET}\n"
+        return 1
+      fi
+      export DO_API_KEY="$do_token"
+      DNS_API_KEY="$do_token"
+      ;;
+    5)
+      DNS_PROVIDER="dns_namecheap"
+      printf "\n📝 Namecheap Configuration:\n"
+      printf "Enter Namecheap API Username: "
+      read -r nc_user
+      printf "Enter Namecheap API Key: "
+      read -r nc_key
+      if [ -z "$nc_user" ] || [ -z "$nc_key" ]; then
+        printf "${RED}❌ API credentials required${RESET}\n"
+        return 1
+      fi
+      export NAMECHEAP_API_KEY="$nc_key"
+      export NAMECHEAP_USERNAME="$nc_user"
+      DNS_API_KEY="${nc_user}:${nc_key}"
+      ;;
+    6)
+      DNS_PROVIDER="dns_gd"
+      printf "\n📝 GoDaddy Configuration:\n"
+      printf "Enter GoDaddy API Key: "
+      read -r gd_key
+      printf "Enter GoDaddy API Secret: "
+      read -r gd_secret
+      if [ -z "$gd_key" ] || [ -z "$gd_secret" ]; then
+        printf "${RED}❌ API credentials required${RESET}\n"
+        return 1
+      fi
+      export GD_Key="$gd_key"
+      export GD_Secret="$gd_secret"
+      DNS_API_KEY="${gd_key}:${gd_secret}"
+      ;;
+    7)
+      DNS_PROVIDER="dns_dynu"
+      printf "\n📝 Dynu Configuration:\n"
+      printf "Enter Dynu Client ID: "
+      read -r dynu_id
+      printf "Enter Dynu Secret: "
+      read -r dynu_secret
+      if [ -z "$dynu_id" ] || [ -z "$dynu_secret" ]; then
+        printf "${RED}❌ API credentials required${RESET}\n"
+        return 1
+      fi
+      export Dynu_ClientId="$dynu_id"
+      export Dynu_Secret="$dynu_secret"
+      DNS_API_KEY="${dynu_id}:${dynu_secret}"
+      ;;
+    8)
+      DNS_PROVIDER="dns_duckdns"
+      printf "\n📝 Duck DNS Configuration (FREE):\n"
+      printf "   Visit: https://www.duckdns.org/\n"
+      printf "   Your domain should be: something.duckdns.org\n"
+      printf "Enter Duck DNS Token: "
+      read -r duck_token
+      if [ -z "$duck_token" ]; then
+        printf "${RED}❌ Token required${RESET}\n"
+        return 1
+      fi
+      export DuckDNS_Token="$duck_token"
+      DNS_API_KEY="$duck_token"
+      ;;
+    9)
+      printf "\n${YELLOW}Manual DNS provider setup${RESET}\n"
+      printf "Enter DNS provider name (from acme.sh docs): "
+      read -r manual_dns
+      DNS_PROVIDER="$manual_dns"
+      printf "${YELLOW}⚠️  You'll need to export provider-specific env vars manually${RESET}\n"
+      ;;
+    *)
+      printf "${RED}❌ Invalid choice${RESET}\n"
+      return 1
+      ;;
+  esac
+  
+  printf "${GREEN}✅ DNS provider configured: ${DNS_PROVIDER}${RESET}\n"
+  return 0
 }
 
 # -----------------------------
@@ -502,25 +693,75 @@ issue_certificate() {
   # Create cert directory
   mkdir -p "$CERT_DIR"
   
-  # Stop NGINX if running (port 80 needed for validation)
-  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    log_debug "Stopping NGINX temporarily for certificate validation"
-    "$STARTUP_SCRIPT" stop >/dev/null 2>&1
-    sleep 2
-  fi
-  
-  # Issue certificate using standalone mode
-  if ! "$ACME_SCRIPT" --issue --standalone -d "$DOMAIN" --keylength 2048 --server letsencrypt; then
-    printf "${RED}❌ Failed to issue certificate${RESET}\n"
-    printf "${YELLOW}Common issues:${RESET}\n"
-    printf "  - Domain does not point to this router's public IP\n"
-    printf "  - Port 80 is not accessible from the internet\n"
-    printf "  - Firewall blocking incoming connections\n"
-    printf "\nContinuing with HTTP only...\n"
-    USE_SSL=0
-    sleep 3
-    return 1
-  fi
+  # Choose validation method based on CHALLENGE_TYPE
+  case "$CHALLENGE_TYPE" in
+    http)
+      # HTTP-01 Challenge - requires port 80 and public IP
+      printf "📡 Using HTTP-01 validation (standalone mode)\n"
+      
+      # Stop NGINX if running (port 80 needed for validation)
+      if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        log_debug "Stopping NGINX temporarily for certificate validation"
+        "$STARTUP_SCRIPT" stop >/dev/null 2>&1
+        sleep 2
+      fi
+      
+      if ! "$ACME_SCRIPT" --issue --standalone -d "$DOMAIN" --keylength 2048 --server letsencrypt; then
+        printf "${RED}❌ Failed to issue certificate (HTTP-01)${RESET}\n"
+        printf "${YELLOW}Common issues:${RESET}\n"
+        printf "  - Domain does not point to this router's public IP\n"
+        printf "  - Port 80 is not accessible from the internet\n"
+        printf "  - Firewall blocking incoming connections\n"
+        printf "\n${YELLOW}💡 Tip: Try DNS-01 validation if HTTP-01 fails${RESET}\n"
+        printf "Continuing with HTTP only...\n"
+        USE_SSL=0
+        sleep 3
+        return 1
+      fi
+      ;;
+      
+    dns)
+      # DNS-01 Challenge - works without public IP
+      printf "🌐 Using DNS-01 validation (${DNS_PROVIDER})\n"
+      printf "${GREEN}✅ No public IP or open ports required!${RESET}\n\n"
+      
+      if ! "$ACME_SCRIPT" --issue --dns "$DNS_PROVIDER" -d "$DOMAIN" --keylength 2048 --server letsencrypt; then
+        printf "${RED}❌ Failed to issue certificate (DNS-01)${RESET}\n"
+        printf "${YELLOW}Common issues:${RESET}\n"
+        printf "  - Invalid DNS API credentials\n"
+        printf "  - Insufficient DNS API permissions\n"
+        printf "  - DNS provider not supported by acme.sh\n"
+        printf "\nContinuing with HTTP only...\n"
+        USE_SSL=0
+        sleep 3
+        return 1
+      fi
+      ;;
+      
+    dns-manual)
+      # Manual DNS-01 Challenge - user creates TXT records manually
+      printf "📝 Using Manual DNS-01 validation\n"
+      printf "${YELLOW}⚠️  You will need to create DNS TXT records manually${RESET}\n\n"
+      
+      if ! "$ACME_SCRIPT" --issue --dns -d "$DOMAIN" --yes-I-know-dns-manual-mode-enough-go-ahead-please --keylength 2048 --server letsencrypt; then
+        printf "${RED}❌ Failed to issue certificate (Manual DNS)${RESET}\n"
+        printf "${YELLOW}Common issues:${RESET}\n"
+        printf "  - TXT record not created or not propagated\n"
+        printf "  - TXT record value incorrect\n"
+        printf "  - DNS propagation can take 5-30 minutes\n"
+        printf "\nContinuing with HTTP only...\n"
+        USE_SSL=0
+        sleep 3
+        return 1
+      fi
+      ;;
+      
+    *)
+      printf "${RED}❌ Unknown challenge type: ${CHALLENGE_TYPE}${RESET}\n"
+      USE_SSL=0
+      return 1
+      ;;
+  esac
   
   # Install certificate to NGINX directory
   "$ACME_SCRIPT" --install-cert -d "$DOMAIN" \

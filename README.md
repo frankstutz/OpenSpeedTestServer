@@ -166,23 +166,79 @@ Installation cancelled. Exiting.
 
 ### SSL/HTTPS with Let's Encrypt
 
-The installer supports automatic SSL certificate generation using Let's Encrypt:
+The installer supports automatic SSL certificate generation using Let's Encrypt with **three validation methods**:
 
-#### Prerequisites:
-1. **Valid domain name** pointing to your router's public IP
-2. **Port 80 accessible** from the internet (for certificate validation)
-3. **Port forwarding configured** on your router if behind NAT
+#### Validation Methods:
+
+**1. HTTP-01 Challenge** (Traditional - requires public IP)
+- **Prerequisites:**
+  - Valid domain name pointing to your router's public IP
+  - Port 80 accessible from the internet
+  - Port forwarding configured on your router if behind NAT
+
+**2. DNS-01 Challenge** (Recommended - NO public IP required) ✨
+- **Prerequisites:**
+  - Valid domain name
+  - DNS API access (Cloudflare, AWS Route53, etc.)
+  - NO public IP or port forwarding needed!
+  
+- **Supported DNS Providers:**
+  - ☁️ Cloudflare (recommended - easy API setup)
+  - 🌐 AWS Route53
+  - 🔵 Google Cloud DNS
+  - 💧 DigitalOcean
+  - 🅽 Namecheap
+  - 🅶 GoDaddy
+  - 🦆 Duck DNS (FREE!)
+  - And 100+ more via acme.sh
+
+**3. Manual DNS** (For testing or manual management)
+- Script pauses and shows TXT record to create
+- Works without API access
+- Suitable for one-time setup
 
 #### During Installation:
 
 When prompted "Do you want to enable SSL/HTTPS with Let's Encrypt?":
-- Answer **Y** to enable SSL
-- Enter your fully qualified domain name (e.g., `speedtest.example.com`)
-- Confirm the setup
+1. Answer **Y** to enable SSL
+2. Enter your fully qualified domain name (e.g., `speedtest.example.com`)
+3. **Choose validation method:**
+   - Option 1: HTTP-01 (requires public IP + port 80)
+   - Option 2: DNS-01 (works without public IP!)
+   - Option 3: Manual DNS (for testing)
+4. If DNS-01: Select your DNS provider and enter API credentials
+5. Confirm the setup
+
+#### Example: DNS-01 with Cloudflare (No Public IP Needed!)
+
+```
+🔒 Do you want to enable SSL/HTTPS with Let's Encrypt? [y/N]: y
+📝 Enter your fully qualified domain name (FQDN): speedtest.example.com
+
+🔐 Choose certificate validation method:
+1️⃣  HTTP-01 (requires public IP and port 80 accessible)
+2️⃣  DNS-01 (works without public IP, requires DNS API)
+3️⃣  Manual DNS (for testing or manual DNS record management)
+Choose [1-3]: 2
+
+🌐 Select your DNS provider:
+1️⃣  Cloudflare (recommended)
+Choose [1-9]: 1
+
+📝 Cloudflare Configuration:
+   Visit: https://dash.cloudflare.com/profile/api-tokens
+   Create token with Zone:DNS:Edit permissions
+
+Enter Cloudflare API Token: [paste your token]
+✅ DNS provider configured: dns_cf
+
+🌐 Using DNS-01 validation (dns_cf)
+✅ No public IP or open ports required!
+```
 
 The installer will:
 1. Install `acme.sh` (Let's Encrypt client)
-2. Request and validate certificate
+2. Request and validate certificate using your chosen method
 3. Configure NGINX with SSL on port 8443
 4. Set up HTTP → HTTPS redirect on port 80
 5. Configure automatic certificate renewal (daily check)
@@ -192,21 +248,41 @@ The installer will:
 # Access after SSL setup
 https://speedtest.example.com:8443
 
-# HTTP automatically redirects to HTTPS
+# HTTP automatically redirects to HTTPS (if port 80 available)
 http://speedtest.example.com → https://speedtest.example.com:8443
 ```
 
 #### Certificate Renewal:
 - **Automatic**: Cron job checks daily, renews if within 60 days of expiry
+- **DNS-01 renewals**: Use saved API credentials (no manual intervention)
 - **Manual renewal**: `/root/.acme.sh/acme.sh --cron --force`
 - **Certificate location**: `/etc/nginx/ssl/`
 
+#### Getting DNS API Credentials:
+
+**Cloudflare (Easiest):**
+1. Login to Cloudflare dashboard
+2. Go to: Profile → API Tokens
+3. Create token with "Zone:DNS:Edit" permission
+4. Copy token and paste during installation
+
+**Duck DNS (Free!):**
+1. Visit https://www.duckdns.org/
+2. Sign in with social account
+3. Get your free subdomain (e.g., `myspeed.duckdns.org`)
+4. Copy your token from the dashboard
+
+**AWS Route53:**
+1. Create IAM user with Route53 permissions
+2. Generate access key ID and secret
+3. Enter both during installation
+
 #### Troubleshooting SSL:
 If certificate issuance fails:
-- Verify domain DNS points to your router's public IP
-- Ensure port 80 is open and forwarded
-- Check firewall rules allow incoming HTTP
-- Installation will continue with HTTP only
+- **HTTP-01**: Verify domain DNS points to your router's public IP, ensure port 80 is open
+- **DNS-01**: Check API credentials are correct and have sufficient permissions
+- **Manual DNS**: Verify TXT record was created correctly, wait 5-30 min for DNS propagation
+- Installation will continue with HTTP only if SSL fails
 
 ---
 
