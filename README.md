@@ -58,6 +58,14 @@
 - 🎛️ **Custom port support** - Override default port 8888
 - 🧪 **Interactive CLI** with confirmations and safe prompts
 
+### SSL/HTTPS Support (NEW!)
+- 🔒 **Let's Encrypt integration** - Automatic SSL certificate generation
+- 🤖 **acme.sh client** - Industry-standard ACME protocol
+- 🔄 **Auto-renewal** - Daily certificate expiry checks
+- 🔐 **TLS 1.2/1.3** - Modern encryption standards
+- ♻️ **HTTP → HTTPS redirect** - Automatic upgrade to secure connection
+- 📜 **Certificate persistence** - Survives firmware updates
+
 ### Tested Devices
 - 🧪 GL-BE9300, GL-BE3600, GL-MT3000, GL-MT1300 (with SD card)
 - ✅ Any OpenWrt-based router with 64MB+ free space
@@ -155,6 +163,50 @@ Installation cancelled. Exiting.
 ```
 
 **Note**: The interrupt handler ensures your system is left in a clean state even if you cancel mid-installation.
+
+### SSL/HTTPS with Let's Encrypt
+
+The installer supports automatic SSL certificate generation using Let's Encrypt:
+
+#### Prerequisites:
+1. **Valid domain name** pointing to your router's public IP
+2. **Port 80 accessible** from the internet (for certificate validation)
+3. **Port forwarding configured** on your router if behind NAT
+
+#### During Installation:
+
+When prompted "Do you want to enable SSL/HTTPS with Let's Encrypt?":
+- Answer **Y** to enable SSL
+- Enter your fully qualified domain name (e.g., `speedtest.example.com`)
+- Confirm the setup
+
+The installer will:
+1. Install `acme.sh` (Let's Encrypt client)
+2. Request and validate certificate
+3. Configure NGINX with SSL on port 8443
+4. Set up HTTP → HTTPS redirect on port 80
+5. Configure automatic certificate renewal (daily check)
+
+#### SSL Configuration:
+```bash
+# Access after SSL setup
+https://speedtest.example.com:8443
+
+# HTTP automatically redirects to HTTPS
+http://speedtest.example.com → https://speedtest.example.com:8443
+```
+
+#### Certificate Renewal:
+- **Automatic**: Cron job checks daily, renews if within 60 days of expiry
+- **Manual renewal**: `/root/.acme.sh/acme.sh --cron --force`
+- **Certificate location**: `/etc/nginx/ssl/`
+
+#### Troubleshooting SSL:
+If certificate issuance fails:
+- Verify domain DNS points to your router's public IP
+- Ensure port 80 is open and forwarded
+- Check firewall rules allow incoming HTTP
+- Installation will continue with HTTP only
 
 ---
 
@@ -352,6 +404,79 @@ DEBUG=1 ./install_openspeedtest.sh
 - Script automatically restores backup
 - Check error details in output
 - Verify port is not already in use
+
+#### SSL Certificate Issuance Failed
+**Symptom**: "Failed to issue certificate"
+**Solutions**:
+
+1. **Verify DNS**:
+```bash
+# Check if domain resolves to your public IP
+nslookup speedtest.example.com
+dig speedtest.example.com
+
+# Get your public IP
+curl ifconfig.me
+```
+
+2. **Check Port 80 Access**:
+```bash
+# From external network, test port 80
+curl -I http://your-domain.com
+
+# Check if port 80 is listening
+netstat -tuln | grep :80
+```
+
+3. **Firewall Rules**:
+```bash
+# Check OpenWrt firewall (if applicable)
+iptables -L -n | grep 80
+
+# Allow HTTP for Let's Encrypt validation
+uci set firewall.http=rule
+uci set firewall.http.name='Allow-HTTP'
+uci set firewall.http.src='wan'
+uci set firewall.http.dest_port='80'
+uci set firewall.http.proto='tcp'
+uci set firewall.http.target='ACCEPT'
+uci commit firewall
+/etc/init.d/firewall reload
+```
+
+4. **Manual Certificate Request**:
+```bash
+# Test acme.sh manually
+/root/.acme.sh/acme.sh --issue --standalone -d your-domain.com --debug
+
+# Check acme.sh logs
+cat /root/.acme.sh/acme.sh.log
+```
+
+5. **Use DNS Challenge (Alternative)**:
+```bash
+# If port 80 is unavailable, use DNS challenge
+/root/.acme.sh/acme.sh --issue --dns -d your-domain.com
+```
+
+**Note**: If SSL fails, installation continues with HTTP only. You can manually configure SSL later.
+
+#### SSL Certificate Not Renewing
+**Symptom**: Certificate expired
+**Solution**:
+```bash
+# Check renewal cron job
+crontab -l | grep acme
+
+# Force renewal
+/root/.acme.sh/acme.sh --cron --force
+
+# Check certificate expiry
+/root/.acme.sh/acme.sh --list
+
+# Reload NGINX after renewal
+/etc/init.d/nginx_speedtest reload
+```
 
 ### Debug Mode
 

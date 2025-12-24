@@ -73,6 +73,13 @@ INSTALLATION_STARTED=0
 DOWNLOAD_PID=""
 UNZIP_PID=""
 
+# SSL/ACME configuration
+USE_SSL=0
+DOMAIN=""
+ACME_SCRIPT="/root/.acme.sh/acme.sh"
+CERT_DIR="/etc/nginx/ssl"
+SSL_PORT=8443
+
 # -----------------------------
 # Detect CPU cores and RAM for tuning
 # -----------------------------
@@ -405,11 +412,156 @@ choose_download_source() {
   case $src in
   1) DOWNLOAD_URL="https://github.com/openspeedtest/Speed-Test/archive/refs/heads/main.zip" ;;
   2) DOWNLOAD_URL="https://fw.gl-inet.com/tools/script/Speed-Test-main.zip" ;;
-  *)
-    printf "❌ Invalid option. Defaulting to official repository.\n"
-    DOWNLOAD_URL="https://github.com/openspeedtest/Speed-Test/archive/refs/heads/main.zip"
-    ;;
+  *) printf "❌ Invalid option. Defaulting to official repository.\n"; DOWNLOAD_URL="https://github.com/openspeedtest/Speed-Test/archive/refs/heads/main.zip" ;;
   esac
+}
+
+# -----------------------------
+# SSL Configuration Prompt
+# -----------------------------
+prompt_ssl_config() {
+  printf "\n🔒 Do you want to enable SSL/HTTPS with Let's Encrypt? [y/N]: "
+  read -r enable_ssl
+  
+  if [ "$enable_ssl" = "y" ] || [ "$enable_ssl" = "Y" ]; then
+    printf "\n📝 Enter your fully qualified domain name (FQDN):\n"
+    printf "   Example: speedtest.example.com\n"
+    printf "   FQDN: "
+    read -r domain_input
+    
+    # Validate FQDN format
+    if ! echo "$domain_input" | grep -qE '^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'; then
+      printf "${RED}❌ Invalid FQDN format. SSL setup skipped.${RESET}\n"
+      printf "   Continuing with HTTP only...\n"
+      sleep 2
+      return
+    fi
+    
+    DOMAIN="$domain_input"
+    USE_SSL=1
+    
+    printf "\n${GREEN}✅ SSL will be configured for: ${DOMAIN}${RESET}\n"
+    printf "${YELLOW}⚠️  Important: Ensure that ${DOMAIN} points to this router's public IP!${RESET}\n"
+    printf "${YELLOW}⚠️  Port 80 must be accessible from the internet for Let's Encrypt validation.${RESET}\n"
+    printf "\nContinue with SSL setup? [y/N]: "
+    read -r confirm_ssl
+    
+    if [ "$confirm_ssl" != "y" ] && [ "$confirm_ssl" != "Y" ]; then
+      printf "SSL setup cancelled. Continuing with HTTP only...\n"
+      USE_SSL=0
+      DOMAIN=""
+      sleep 2
+    fi
+  fi
+}
+
+# -----------------------------
+# Install acme.sh
+# -----------------------------
+install_acme_sh() {
+  if [ -f "$ACME_SCRIPT" ]; then
+    log_verbose "acme.sh already installed"
+    return 0
+  fi
+  
+  printf "📦 Installing acme.sh (Let's Encrypt client)...\n"
+  
+  # Install required dependencies
+  if ! command -v socat >/dev/null 2>&1; then
+    if [ "$opkg_updated" -eq 0 ]; then
+      opkg update >/dev/null 2>&1
+      opkg_updated=1
+    fi
+    opkg install socat >/dev/null 2>&1 || printf "${YELLOW}⚠️  Could not install socat, using standalone mode${RESET}\n"
+  fi
+  
+  # Download and install acme.sh
+  wget -O /tmp/acme.sh.tar.gz https://github.com/acmesh-official/acme.sh/archive/master.tar.gz 2>/dev/null || {
+    error_exit "Failed to download acme.sh"
+  }
+  
+  cd /tmp || error_exit "Cannot access /tmp"
+  tar -xzf acme.sh.tar.gz || error_exit "Failed to extract acme.sh"
+  cd acme.sh-master || error_exit "acme.sh directory not found"
+  
+  ./acme.sh --install --nocron --home /root/.acme.sh || error_exit "Failed to install acme.sh"
+  
+  cd /
+  rm -rf /tmp/acme.sh-master /tmp/acme.sh.tar.gz
+  
+  printf "${GREEN}✅ acme.sh installed successfully${RESET}\n"
+}
+
+# -----------------------------
+# Issue SSL Certificate
+# -----------------------------
+issue_certificate() {
+  printf "\n🔐 Requesting SSL certificate for ${DOMAIN}...\n"
+  printf "${YELLOW}This may take 1-2 minutes...${RESET}\n\n"
+  
+  # Create cert directory
+  mkdir -p "$CERT_DIR"
+  
+  # Stop NGINX if running (port 80 needed for validation)
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    log_debug "Stopping NGINX temporarily for certificate validation"
+    "$STARTUP_SCRIPT" stop >/dev/null 2>&1
+    sleep 2
+  fi
+  
+  # Issue certificate using standalone mode
+  if ! "$ACME_SCRIPT" --issue --standalone -d "$DOMAIN" --keylength 2048 --server letsencrypt; then
+    printf "${RED}❌ Failed to issue certificate${RESET}\n"
+    printf "${YELLOW}Common issues:${RESET}\n"
+    printf "  - Domain does not point to this router's public IP\n"
+    printf "  - Port 80 is not accessible from the internet\n"
+    printf "  - Firewall blocking incoming connections\n"
+    printf "\nContinuing with HTTP only...\n"
+    USE_SSL=0
+    sleep 3
+    return 1
+  fi
+  
+  # Install certificate to NGINX directory
+  "$ACME_SCRIPT" --install-cert -d "$DOMAIN" \
+    --key-file "$CERT_DIR/${DOMAIN}.key" \
+    --fullchain-file "$CERT_DIR/${DOMAIN}.crt" \
+    --reloadcmd "/etc/init.d/nginx_speedtest reload" || {
+    printf "${RED}❌ Failed to install certificate${RESET}\n"
+    USE_SSL=0
+    return 1
+  }
+  
+  printf "${GREEN}✅ SSL certificate issued and installed successfully${RESET}\n"
+  
+  # Set up auto-renewal
+  setup_cert_renewal
+  
+  return 0
+}
+
+# -----------------------------
+# Setup Certificate Auto-Renewal
+# -----------------------------
+setup_cert_renewal() {
+  printf "⚙️  Setting up automatic certificate renewal...\n"
+  
+  # Create cron job for renewal (runs daily, renews if within 60 days of expiry)
+  CRON_JOB="0 0 * * * $ACME_SCRIPT --cron --home /root/.acme.sh > /dev/null"
+  
+  # Check if cron job already exists
+  if ! crontab -l 2>/dev/null | grep -q "$ACME_SCRIPT --cron"; then
+    (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+    printf "${GREEN}✅ Auto-renewal configured (daily check)${RESET}\n"
+  else
+    log_verbose "Cron job already exists"
+  fi
+  
+  # Add to persistence if enabled
+  if [ -f /etc/sysupgrade.conf ]; then
+    grep -Fxq "/root/.acme.sh" /etc/sysupgrade.conf 2>/dev/null || echo "/root/.acme.sh" >> /etc/sysupgrade.conf
+    grep -Fxq "$CERT_DIR" /etc/sysupgrade.conf 2>/dev/null || echo "$CERT_DIR" >> /etc/sysupgrade.conf
+  fi
 }
 
 # -----------------------------
@@ -521,9 +673,15 @@ install_openspeedtest() {
   
   detect_hardware
   check_port_available
+  prompt_ssl_config  # Ask about SSL before installation
   install_dependencies
   check_space
   choose_download_source
+  
+  # Install acme.sh if SSL is requested
+  if [ "$USE_SSL" -eq 1 ]; then
+    install_acme_sh
+  fi
 
   # Backup existing config if present
   [ -f "$CONFIG_PATH" ] && cp "$CONFIG_PATH" "$CONFIG_BACKUP"
@@ -568,10 +726,12 @@ install_openspeedtest() {
   [ -d Speed-Test-main ] || error_exit "Speed-Test-main directory not found after extraction"
 
   # Create optimized NGINX config for embedded devices
-  cat <<EOF >"$CONFIG_PATH"
-# Optimized NGINX config for OpenWrt/embedded devices
+  if [ "$USE_SSL" -eq 1 ]; then
+    # Generate config with SSL support
+    cat <<EOF >"$CONFIG_PATH"
+# Optimized NGINX config for OpenWrt/embedded devices with SSL
 # Auto-tuned for: ${CPU_CORES} cores, ${TOTAL_RAM_MB}MB RAM
-# Minimal configuration compatible with nginx-ssl
+# Domain: ${DOMAIN}
 
 worker_processes  ${NGINX_WORKERS};
 worker_rlimit_nofile 4096;
@@ -582,7 +742,6 @@ events {
     multi_accept on;
 }
 
-# Only log critical errors to conserve disk space
 error_log  ${ERROR_LOG} crit;
 pid        ${PID_FILE};
 
@@ -590,57 +749,73 @@ http {
     include       mime.types;
     default_type  application/octet-stream;
 
-    # Performance tuning for embedded devices
     sendfile on;
     tcp_nodelay on;
     tcp_nopush on;
     keepalive_timeout 30;
     keepalive_requests 50;
     
-    # Connection timeouts to prevent resource exhaustion
     client_body_timeout 30s;
     client_header_timeout 30s;
     send_timeout 30s;
     
-    # Buffer sizes - conservative for low RAM
     client_body_buffer_size 8k;
     client_header_buffer_size 1k;
     large_client_header_buffers 2 1k;
     
-    # Disable server version in headers
     server_tokens off;
 
+    # HTTP server - redirect to HTTPS
     server {
-        server_name _;
-        listen ${PORT};
+        listen 80;
+        server_name ${DOMAIN};
+        
+        # Allow ACME challenges for certificate renewal
+        location ^~ /.well-known/acme-challenge/ {
+            default_type "text/plain";
+            root /tmp;
+        }
+        
+        # Redirect all other traffic to HTTPS
+        location / {
+            return 301 https://\$server_name\$request_uri;
+        }
+    }
+
+    # HTTPS server
+    server {
+        listen ${SSL_PORT} ssl;
+        server_name ${DOMAIN};
         root ${INSTALL_DIR}/Speed-Test-main;
         index index.html;
 
-        # Reasonable limit for speed tests (1GB)
+        # SSL configuration
+        ssl_certificate ${CERT_DIR}/${DOMAIN}.crt;
+        ssl_certificate_key ${CERT_DIR}/${DOMAIN}.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
         client_max_body_size 1024M;
-        
-        # No logging for performance
         access_log off;
         log_not_found off;
-        
-        # Allow POST to static files (needed for speed test uploads)
         error_page 405 =200 \$uri;
 
         location / {
-            # CORS headers for speed test functionality
             add_header 'Access-Control-Allow-Origin' "*" always;
             add_header 'Access-Control-Allow-Headers' 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Mx-ReqToken,X-Requested-With' always;
             add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
             add_header 'Cache-Control' 'no-store, no-cache, max-age=0, no-transform';
+            add_header 'Strict-Transport-Security' 'max-age=31536000' always;
             
-            # Handle CORS preflight
             if (\$request_method = OPTIONS) {
                 add_header 'Access-Control-Allow-Credentials' "true";
                 return 204;
             }
         }
 
-        # Static file caching for UI assets
         location ~* ^.+\\.(?:css|cur|js|jpe?g|gif|htc|ico|png|html|xml|otf|ttf|eot|woff|woff2|svg)\$ {
             access_log off;
             expires 7d;
@@ -650,6 +825,77 @@ http {
     }
 }
 EOF
+  else
+    # Generate config without SSL (HTTP only)
+    cat <<EOF >"$CONFIG_PATH"
+# Optimized NGINX config for OpenWrt/embedded devices
+# Auto-tuned for: ${CPU_CORES} cores, ${TOTAL_RAM_MB}MB RAM
+
+worker_processes  ${NGINX_WORKERS};
+worker_rlimit_nofile 4096;
+user nobody nogroup;
+
+events {
+    worker_connections ${NGINX_CONNECTIONS};
+    multi_accept on;
+}
+
+error_log  ${ERROR_LOG} crit;
+pid        ${PID_FILE};
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    sendfile on;
+    tcp_nodelay on;
+    tcp_nopush on;
+    keepalive_timeout 30;
+    keepalive_requests 50;
+    
+    client_body_timeout 30s;
+    client_header_timeout 30s;
+    send_timeout 30s;
+    
+    client_body_buffer_size 8k;
+    client_header_buffer_size 1k;
+    large_client_header_buffers 2 1k;
+    
+    server_tokens off;
+
+    server {
+        server_name _;
+        listen ${PORT};
+        root ${INSTALL_DIR}/Speed-Test-main;
+        index index.html;
+
+        client_max_body_size 1024M;
+        access_log off;
+        log_not_found off;
+        error_page 405 =200 \$uri;
+
+        location / {
+            add_header 'Access-Control-Allow-Origin' "*" always;
+            add_header 'Access-Control-Allow-Headers' 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Mx-ReqToken,X-Requested-With' always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+            add_header 'Cache-Control' 'no-store, no-cache, max-age=0, no-transform';
+            
+            if (\$request_method = OPTIONS) {
+                add_header 'Access-Control-Allow-Credentials' "true";
+                return 204;
+            }
+        }
+
+        location ~* ^.+\\.(?:css|cur|js|jpe?g|gif|htc|ico|png|html|xml|otf|ttf|eot|woff|woff2|svg)\$ {
+            access_log off;
+            expires 7d;
+            add_header Cache-Control public;
+            tcp_nodelay off;
+        }
+    }
+}
+EOF
+  fi
 
   # Validate configuration
   validate_nginx_config
@@ -745,6 +991,76 @@ EOF
   # Create log rotation
   create_logrotate
 
+  # Issue SSL certificate if requested
+  if [ "$USE_SSL" -eq 1 ]; then
+    if ! issue_certificate; then
+      printf "${YELLOW}⚠️  SSL certificate issuance failed. Starting with HTTP only.${RESET}\n"
+      USE_SSL=0
+      # Regenerate config without SSL
+      cat <<EOF >"$CONFIG_PATH"
+# Fallback HTTP-only config after SSL failure
+worker_processes  ${NGINX_WORKERS};
+worker_rlimit_nofile 4096;
+user nobody nogroup;
+
+events {
+    worker_connections ${NGINX_CONNECTIONS};
+    multi_accept on;
+}
+
+error_log  ${ERROR_LOG} crit;
+pid        ${PID_FILE};
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile on;
+    tcp_nodelay on;
+    tcp_nopush on;
+    keepalive_timeout 30;
+    keepalive_requests 50;
+    client_body_timeout 30s;
+    client_header_timeout 30s;
+    send_timeout 30s;
+    client_body_buffer_size 8k;
+    client_header_buffer_size 1k;
+    large_client_header_buffers 2 1k;
+    server_tokens off;
+
+    server {
+        server_name _;
+        listen ${PORT};
+        root ${INSTALL_DIR}/Speed-Test-main;
+        index index.html;
+        client_max_body_size 1024M;
+        access_log off;
+        log_not_found off;
+        error_page 405 =200 \$uri;
+
+        location / {
+            add_header 'Access-Control-Allow-Origin' "*" always;
+            add_header 'Access-Control-Allow-Headers' 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Mx-ReqToken,X-Requested-With' always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+            add_header 'Cache-Control' 'no-store, no-cache, max-age=0, no-transform';
+            if (\$request_method = OPTIONS) {
+                add_header 'Access-Control-Allow-Credentials' "true";
+                return 204;
+            }
+        }
+
+        location ~* ^.+\\.(?:css|cur|js|jpe?g|gif|htc|ico|png|html|xml|otf|ttf|eot|woff|woff2|svg)\$ {
+            access_log off;
+            expires 7d;
+            add_header Cache-Control public;
+            tcp_nodelay off;
+        }
+    }
+}
+EOF
+      validate_nginx_config
+    fi
+  fi
+
   # Start NGINX
   printf "Starting OpenSpeedTest NGINX...\n"
   if ! "$STARTUP_SCRIPT" start; then
@@ -760,7 +1076,16 @@ EOF
   # Detect internal IP
   detect_internal_ip
   printf "\n✅ Installation complete!\n"
-  printf "🌐 Access OpenSpeedTest at: ${CYAN}http://%s:%d${RESET}\n" "$INTERNAL_IP" "$PORT"
+  
+  if [ "$USE_SSL" -eq 1 ]; then
+    printf "🔒 SSL enabled: ${GREEN}https://%s:%d${RESET}\n" "$DOMAIN" "$SSL_PORT"
+    printf "🌐 HTTP redirect: http://%s (redirects to HTTPS)\n" "$DOMAIN"
+    printf "📜 Certificate: ${CERT_DIR}/${DOMAIN}.crt\n"
+    printf "🔄 Auto-renewal: Configured (daily check)\n"
+  else
+    printf "🌐 Access OpenSpeedTest at: ${CYAN}http://%s:%d${RESET}\n" "$INTERNAL_IP" "$PORT"
+  fi
+  
   printf "📊 Performance tuning: ${NGINX_WORKERS} workers, ${NGINX_CONNECTIONS} max connections\n"
   printf "📝 Error logs: ${ERROR_LOG} (errors only, rotated at 100KB)\n"
 
