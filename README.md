@@ -133,6 +133,29 @@ You can also set a custom port before installation:
 PORT=9999 ./install_openspeedtest.sh
 ```
 
+### Cancelling Installation (Ctrl-C)
+
+You can safely cancel the installation at any time by pressing **Ctrl-C**. The script will:
+
+1. **Immediately stop** all background processes (downloads, extraction, etc.)
+2. **Clean up** partial installations:
+   - Stop any NGINX processes started during installation
+   - Remove incomplete downloads
+   - Restore previous configuration (if it existed)
+3. **Release resources** (lock files, temporary files)
+4. **Exit gracefully** with proper cleanup
+
+Example output when cancelled:
+```
+⚠️  Installation interrupted by user (Ctrl-C)
+🧹 Cleaning up partial installation...
+✅ Restored previous configuration
+✅ Cleanup completed
+Installation cancelled. Exiting.
+```
+
+**Note**: The interrupt handler ensures your system is left in a clean state even if you cancel mid-installation.
+
 ---
 
 ## 🔍 Menu Options

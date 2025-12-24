@@ -68,6 +68,11 @@ TMP_NEW_SCRIPT="/tmp/install_openspeedtest_new.sh"
 SCRIPT_PATH="$0"
 [ "${SCRIPT_PATH#*/}" != "$SCRIPT_PATH" ] || SCRIPT_PATH="$(pwd)/$SCRIPT_PATH"
 
+# Track installation state for cleanup
+INSTALLATION_STARTED=0
+DOWNLOAD_PID=""
+UNZIP_PID=""
+
 # -----------------------------
 # Detect CPU cores and RAM for tuning
 # -----------------------------
@@ -124,8 +129,57 @@ error_exit() {
   exit 1
 }
 
+handle_interrupt() {
+  printf "\n\n${YELLOW}⚠️  Installation interrupted by user (Ctrl-C)${RESET}\n"
+  log_debug "SIGINT received, cleaning up..."
+  
+  # Kill any background processes (downloads, unzip, etc.)
+  if [ -n "$DOWNLOAD_PID" ] && kill -0 "$DOWNLOAD_PID" 2>/dev/null; then
+    log_debug "Killing download process $DOWNLOAD_PID"
+    kill -TERM "$DOWNLOAD_PID" 2>/dev/null
+  fi
+  
+  if [ -n "$UNZIP_PID" ] && kill -0 "$UNZIP_PID" 2>/dev/null; then
+    log_debug "Killing unzip process $UNZIP_PID"
+    kill -TERM "$UNZIP_PID" 2>/dev/null
+  fi
+  
+  # Clean up partial installation if started
+  if [ "$INSTALLATION_STARTED" -eq 1 ]; then
+    printf "${YELLOW}🧹 Cleaning up partial installation...${RESET}\n"
+    
+    # Stop NGINX if it was started during this session
+    if [ -f "$PID_FILE" ]; then
+      NGINX_PID=$(cat "$PID_FILE" 2>/dev/null)
+      if [ -n "$NGINX_PID" ] && kill -0 "$NGINX_PID" 2>/dev/null; then
+        log_debug "Stopping NGINX process $NGINX_PID"
+        kill -TERM "$NGINX_PID" 2>/dev/null
+        sleep 1
+      fi
+      rm -f "$PID_FILE"
+    fi
+    
+    # Remove incomplete download/extract
+    [ -f "$INSTALL_DIR/main.zip" ] && rm -f "$INSTALL_DIR/main.zip" && log_verbose "Removed incomplete download"
+    
+    # Restore backup config if it exists
+    if [ -f "$CONFIG_BACKUP" ] && [ -f "$CONFIG_PATH" ]; then
+      log_debug "Restoring configuration backup"
+      mv "$CONFIG_BACKUP" "$CONFIG_PATH"
+      printf "${YELLOW}✅ Restored previous configuration${RESET}\n"
+    fi
+    
+    printf "${YELLOW}✅ Cleanup completed${RESET}\n"
+  fi
+  
+  cleanup_on_exit
+  printf "${YELLOW}Installation cancelled. Exiting.${RESET}\n"
+  exit 130  # Standard exit code for SIGINT
+}
+
 cleanup_on_exit() {
   rm -f "$LOCK_FILE" 2>/dev/null
+  rm -f "$TMP_NEW_SCRIPT" 2>/dev/null
   log_debug "Cleanup completed"
 }
 
@@ -138,7 +192,12 @@ acquire_lock() {
     rm -f "$LOCK_FILE"
   fi
   echo $$ >"$LOCK_FILE"
-  trap cleanup_on_exit EXIT INT TERM
+  
+  # Set up traps for clean exit and interrupt handling
+  trap cleanup_on_exit EXIT
+  trap handle_interrupt INT TERM
+  
+  log_debug "Lock acquired and traps set (PID: $$)"
 }
 
 spinner() {
@@ -458,6 +517,8 @@ validate_nginx_config() {
 # -----------------------------
 install_openspeedtest() {
   acquire_lock
+  INSTALLATION_STARTED=1  # Mark installation as started for cleanup
+  
   detect_hardware
   check_port_available
   install_dependencies
@@ -485,18 +546,22 @@ install_openspeedtest() {
   # Download with spinner and timeout
   log_debug "Downloading from $DOWNLOAD_URL"
   timeout 300 wget -q -T 30 -O main.zip "$DOWNLOAD_URL" >/dev/null 2>&1 &
-  wget_pid=$!
-  if ! spinner "$wget_pid" "Downloading OpenSpeedTest"; then
+  DOWNLOAD_PID=$!
+  if ! spinner "$DOWNLOAD_PID" "Downloading OpenSpeedTest"; then
+    DOWNLOAD_PID=""
     error_exit "Download failed or timed out"
   fi
+  DOWNLOAD_PID=""  # Clear after successful completion
   validate_download "main.zip" 100000
 
   # Unzip with spinner
   unzip -o main.zip >/dev/null 2>&1 &
-  unzip_pid=$!
-  if ! spinner "$unzip_pid" "Unzipping"; then
+  UNZIP_PID=$!
+  if ! spinner "$UNZIP_PID" "Unzipping"; then
+    UNZIP_PID=""
     error_exit "Extraction failed"
   fi
+  UNZIP_PID=""  # Clear after successful completion
   rm main.zip
 
   # Verify extraction
@@ -702,8 +767,8 @@ EOF
   printf "📊 Performance tuning: ${NGINX_WORKERS} workers, ${NGINX_CONNECTIONS} max connections\n"
   printf "📝 Error logs: ${ERROR_LOG} (errors only, rotated at 100KB)\n"
 
+  INSTALLATION_STARTED=0  # Reset flag after successful installation
   prompt_persist
-  cleanup_on_exit
   press_any_key
 }
 
