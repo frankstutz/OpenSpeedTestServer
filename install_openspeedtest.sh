@@ -571,16 +571,15 @@ install_openspeedtest() {
   cat <<EOF >"$CONFIG_PATH"
 # Optimized NGINX config for OpenWrt/embedded devices
 # Auto-tuned for: ${CPU_CORES} cores, ${TOTAL_RAM_MB}MB RAM
+# Minimal configuration compatible with nginx-ssl
 
 worker_processes  ${NGINX_WORKERS};
-worker_rlimit_nofile 4096;  # Reduced from 100000 for embedded devices
-worker_priority -5;
+worker_rlimit_nofile 4096;
 user nobody nogroup;
 
 events {
-    worker_connections ${NGINX_CONNECTIONS};  # Tuned based on available RAM
+    worker_connections ${NGINX_CONNECTIONS};
     multi_accept on;
-    use epoll;  # Efficient for Linux
 }
 
 # Only log critical errors to conserve disk space
@@ -595,9 +594,8 @@ http {
     sendfile on;
     tcp_nodelay on;
     tcp_nopush on;
-    keepalive_timeout 30;  # Reduced from default 65
-    keepalive_requests 50;  # Limit reuse
-    reset_timedout_connection on;
+    keepalive_timeout 30;
+    keepalive_requests 50;
     
     # Connection timeouts to prevent resource exhaustion
     client_body_timeout 30s;
@@ -609,12 +607,11 @@ http {
     client_header_buffer_size 1k;
     large_client_header_buffers 2 1k;
     
-    # Disable unused features
+    # Disable server version in headers
     server_tokens off;
-    gzip off;  # Speed test should not use compression
 
     server {
-        server_name _ localhost;
+        server_name _;
         listen ${PORT};
         root ${INSTALL_DIR}/Speed-Test-main;
         index index.html;
@@ -626,29 +623,29 @@ http {
         access_log off;
         log_not_found off;
         
+        # Allow POST to static files (needed for speed test uploads)
         error_page 405 =200 \$uri;
-        
-        # DNS resolver (use local dnsmasq)
-        resolver 127.0.0.1 valid=300s;
-        resolver_timeout 5s;
 
         location / {
+            # CORS headers for speed test functionality
             add_header 'Access-Control-Allow-Origin' "*" always;
             add_header 'Access-Control-Allow-Headers' 'Accept,Authorization,Cache-Control,Content-Type,DNT,If-Modified-Since,Keep-Alive,Origin,User-Agent,X-Mx-ReqToken,X-Requested-With' always;
             add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-            add_header Cache-Control 'no-store, no-cache, max-age=0, no-transform';
+            add_header 'Cache-Control' 'no-store, no-cache, max-age=0, no-transform';
+            
+            # Handle CORS preflight
             if (\$request_method = OPTIONS) {
-                add_header Access-Control-Allow-Credentials "true";
+                add_header 'Access-Control-Allow-Credentials' "true";
                 return 204;
             }
         }
 
+        # Static file caching for UI assets
         location ~* ^.+\\.(?:css|cur|js|jpe?g|gif|htc|ico|png|html|xml|otf|ttf|eot|woff|woff2|svg)\$ {
             access_log off;
-            expires 7d;  # Reduced from 365d to save RAM
+            expires 7d;
             add_header Cache-Control public;
-            add_header Vary Accept-Encoding;
-            tcp_nodelay off;  # Allow buffering for static files
+            tcp_nodelay off;
         }
     }
 }
